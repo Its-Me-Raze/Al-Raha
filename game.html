@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>Pixel Platformer — NEX STUDIO</title>
+<style>
+:root {
+  --ui-bg: rgba(0,0,0,0.45);
+  --accent: #70f3ff;
+}
+html,body {
+  height:100%; margin:0;
+  background:#0b1020; color:#fff;
+  font-family:Inter,system-ui,monospace;
+}
+#wrap {
+  position:fixed; inset:0;
+  display:flex; align-items:center; justify-content:center;
+  padding:12px;
+}
+canvas {
+  image-rendering:pixelated;
+  border-radius:10px;
+  box-shadow:0 10px 40px rgba(0,0,0,0.6);
+}
+.ui {
+  position:fixed; left:12px; top:12px;
+  background:var(--ui-bg);
+  padding:8px 10px; border-radius:8px;
+  backdrop-filter:blur(6px);
+  font-size:13px; color:#e6f7ff;
+}
+.controls-touch {
+  position:fixed; right:10px; bottom:10px;
+  display:none; gap:14px; align-items:flex-end;
+}
+.btn {
+  width:72px; height:72px;
+  border-radius:14px;
+  background:rgba(255,255,255,0.08);
+  display:flex; align-items:center; justify-content:center;
+  font-weight:700; font-size:22px;
+  user-select:none; touch-action:none;
+}
+.btn:active {
+  transform:translateY(2px);
+  box-shadow:inset 0 -4px 8px rgba(0,0,0,0.3);
+}
+@media (pointer:coarse){
+  .controls-touch{display:flex}
+  .ui{display:none}
+}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="screen"></canvas>
+</div>
+
+<div class="ui" id="hud">Use ← → or A D to move • ↑/W/Space to jump • Collect coins ✨</div>
+
+<div class="controls-touch">
+  <div class="btn" id="leftBtn">◀</div>
+  <div style="display:flex;flex-direction:column;gap:8px;align-items:center;">
+    <div class="btn" id="upBtn">▲</div>
+    <div class="btn" id="rightBtn">▶</div>
+  </div>
+</div>
+
+<script>
+(() => {
+  // --- Virtual resolution ---
+  const V_W = 320, V_H = 180;
+  const canvas = document.getElementById('screen');
+  const ctx = canvas.getContext('2d');
+
+  function resize() {
+    const maxW = Math.floor(window.innerWidth - 24);
+    const maxH = Math.floor(window.innerHeight - 24);
+    const scale = Math.max(1, Math.floor(Math.min(maxW / V_W, maxH / V_H)));
+    canvas.style.width = (V_W * scale) + 'px';
+    canvas.style.height = (V_H * scale) + 'px';
+    canvas.width = V_W;
+    canvas.height = V_H;
+    ctx.imageSmoothingEnabled = false;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  const palette = {
+    sky1: '#081023', sky2: '#0e1a33', mountain1:'#0e3a4b', mountain2:'#072d3a',
+    ground:'#0b2e2a', platform:'#264b57', accent:'#ffd76b', coin:'#ffcf49'
+  };
+
+  // --- Input ---
+  const input = { left:false, right:false, up:false };
+  window.addEventListener('keydown', e => {
+    if (['ArrowLeft','a','A'].includes(e.key)) input.left = true;
+    if (['ArrowRight','d','D'].includes(e.key)) input.right = true;
+    if (['ArrowUp','w','W'].includes(e.key) || e.code === 'Space') input.up = true;
+  });
+  window.addEventListener('keyup', e => {
+    if (['ArrowLeft','a','A'].includes(e.key)) input.left = false;
+    if (['ArrowRight','d','D'].includes(e.key)) input.right = false;
+    if (['ArrowUp','w','W'].includes(e.key) || e.code === 'Space') input.up = false;
+  });
+
+  // Touch controls
+  function bindTouch(btn, prop) {
+    let held = false;
+    btn.addEventListener('pointerdown', e => { input[prop] = true; held = true; e.preventDefault(); });
+    btn.addEventListener('pointerup', e => { input[prop] = false; held = false; e.preventDefault(); });
+    btn.addEventListener('pointerleave', () => { if(held) input[prop] = false; held = false; });
+  }
+  bindTouch(document.getElementById('leftBtn'), 'left');
+  bindTouch(document.getElementById('rightBtn'), 'right');
+  bindTouch(document.getElementById('upBtn'), 'up');
+
+  // --- World ---
+  const gravity = 0.55;
+  const friction = 0.88;
+  const speed = 1.0;
+  const jumpStrength = 9.5;
+
+  const player = { x:40, y: V_H - 48, w:8, h:12, vx:0, vy:0, grounded:false, dir:1, animTime:0, state:'idle' };
+
+  let platforms = [];
+  function generatePlatforms() {
+    platforms = [{x:-1000, y:V_H-16, w:3000, h:16}];
+    let posX = 64;
+    for (let i = 0; i < 20; i++) {
+      const w = 48 + Math.random()*80;
+      const y = 80 + Math.random()*60;
+      platforms.push({x:posX, y:y, w:w, h:10});
+      posX += w + 60 + Math.random()*60;
+    }
+  }
+  generatePlatforms();
+
+  const coins = [];
+  function generateCoins() {
+    coins.length = 0;
+    for(let p of platforms){
+      if(p !== platforms[0] && Math.random() < 0.6 && p.w > 30){
+        let cx = p.x + 8 + Math.random()*(p.w-16) | 0;
+        coins.push({x:cx, y:p.y - 10, r:3, taken:false, bob: Math.random()*Math.PI*2});
+      }
+    }
+  }
+  generateCoins();
+
+  const particles = [];
+  const cam = {x:0,y:0};
+
+  // Background layers
+  function generateMountains(count, minH, maxH, baseY) {
+    const arr=[];
+    for(let i=0;i<count;i++){
+      arr.push({x:i*(V_W*0.9)+Math.random()*40, h: minH + Math.random()*(maxH-minH), baseY});
+    }
+    return arr;
+  }
+  function generateClouds(count){
+    const arr=[];
+    for(let i=0;i<count;i++) arr.push({x: Math.random()*2000, y: 20 + Math.random()*40, s: 10+Math.random()*28});
+    return arr;
+  }
+  const bgLayers = [
+    {speed:0.12, items: generateMountains(6, 30, 100, 140)},
+    {speed:0.25, items: generateMountains(8, 18, 60, 100)},
+    {speed:0.5, items: generateClouds(12)}
+  ];
+
+  function rectsIntersect(a,b){
+    return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+  }
+  function spawnParticles(x,y,color,n=10){
+    for(let i=0;i<n;i++){
+      particles.push({ x, y, vx:(Math.random()-0.5)*2.2, vy:(Math.random()-1.5)*2.6, life:30+Math.random()*20, t:0, size:1+Math.random()*2, color });
+    }
+  }
+
+  function update(){
+    if(input.left) { player.vx -= speed; player.dir=-1; }
+    if(input.right){ player.vx += speed; player.dir=1; }
+
+    player.vx *= friction;
+    if(Math.abs(player.vx) < 0.05) player.vx = 0;
+
+    player.vy += gravity;
+    player.y += player.vy;
+    player.x += player.vx;
+
+    player.grounded = false;
+    for(let p of platforms){
+      const plat = {x:p.x, y:p.y, w:p.w, h:p.h};
+      if(rectsIntersect(player, plat)){
+        if(player.vy > 0 && (player.y + player.h - player.vy) <= plat.y + 1){
+          player.y = plat.y - player.h;
+          player.vy = 0;
+          player.grounded = true;
+        }
+      }
+    }
+
+    if(input.up && player.grounded){
+      player.vy = -jumpStrength;
+      player.grounded = false;
+      spawnParticles(player.x + player.w/2, player.y + player.h, '#9be6ff', 12);
+    }
+
+    if(!player.grounded) player.state = player.vy < 0 ? 'jump' : 'fall';
+    else player.state = Math.abs(player.vx) > 0.8 ? 'run' : 'idle';
+    player.animTime++;
+
+    for(let c of coins){
+      if(!c.taken){
+        if(Math.hypot((player.x+player.w/2)-c.x,(player.y+player.h/2)-c.y) < 12){
+          c.taken = true;
+          spawnParticles(c.x, c.y, palette.coin, 16);
+        }
+      }
+      c.bob += 0.08;
+    }
+
+    for(let i=particles.length-1;i>=0;i--){
+      const p = particles[i];
+      p.x += p.vx; p.y += p.vy; p.vy += 0.12; p.t++;
+      if(p.t > p.life) particles.splice(i,1);
+    }
+
+    cam.x += ((player.x + player.w/2) - V_W/2 - cam.x) * 0.08;
+  }
+
+  function draw(){
+    const g = ctx.createLinearGradient(0,0,0,V_H);
+    g.addColorStop(0, palette.sky1); g.addColorStop(1, palette.sky2);
+    ctx.fillStyle = g; ctx.fillRect(0,0,V_W,V_H);
+
+    for(let i=0;i<bgLayers.length;i++){
+      const layer = bgLayers[i];
+      ctx.save(); ctx.translate(-Math.floor(cam.x * layer.speed), 0);
+      if(i===2) for(let c of layer.items) drawCloud(c.x, c.y, c.s);
+      else for(let m of layer.items) drawMountain(m.x, m.baseY, m.h);
+      ctx.restore();
+    }
+
+    for(let p of platforms) drawPlatform(p.x - cam.x, p.y, p.w, p.h);
+    for(let c of coins){ if(!c.taken) drawCoin(c.x - cam.x, c.y + Math.sin(c.bob)*2, c.r); }
+    drawPlayer(player.x - cam.x, player.y, player);
+    for(let p of particles) { ctx.fillStyle = p.color; ctx.fillRect(Math.round(p.x - cam.x), Math.round(p.y), p.size, p.size); }
+
+    ctx.fillStyle = '#eafcff'; ctx.font = '8px monospace';
+    ctx.fillText('Coins: ' + coins.filter(c=>c.taken).length + '/' + coins.length, 8, 12);
+  }
+
+  function drawMountain(x, baseY, h){
+    ctx.fillStyle = palette.mountain1;
+    ctx.beginPath(); ctx.moveTo(x, V_H);
+    ctx.lineTo(x + 40, V_H - baseY - h*0.6);
+    ctx.lineTo(x + 80, V_H); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = palette.mountain2;
+    ctx.fillRect(x+30, V_H - (baseY/2 + h*0.2), 8, 40);
+  }
+  function drawCloud(cx, cy, s){
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.beginPath(); ctx.ellipse(cx, cy, s*1.3, s*0.6, 0, 0, Math.PI*2); ctx.fill();
+  }
+  function drawPlatform(x,y,w,h){
+    ctx.fillStyle = palette.platform; ctx.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h));
+  }
+  function drawCoin(x,y,r){
+    ctx.fillStyle = palette.coin; ctx.fillRect(Math.round(x)-r, Math.round(y)-r, r*2, r*2);
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(Math.round(x)-1, Math.round(y)-1, 2, 2);
+  }
+  function drawPlayer(drawX, drawY, p){
+    const px = Math.round(drawX), py = Math.round(drawY);
+    ctx.fillStyle = '#032428'; ctx.fillRect(px, py + p.h - 1, p.w, 1);
+    let bodyColor = '#70f3ff'; if(p.state === 'run') bodyColor = '#7ef0c9';
+    if(p.state === 'jump') bodyColor = '#ffd07a'; if(p.state === 'fall') bodyColor = '#ff9fb1';
+    ctx.fillStyle = bodyColor; ctx.fillRect(px, py+1, p.w, p.h-3);
+    ctx.fillStyle = '#0b1f2a'; ctx.fillRect(px+1, py-3, p.w-2, 3);
+    ctx.fillStyle = '#fff'; ctx.fillRect(px + (p.dir===1 ? p.w-3 : 1), py-2, 1, 1);
+  }
+
+  function loop(){
+    update();
+    draw();
+    requestAnimationFrame(loop);
+  }
+  loop();
+})();
+</script>
+</body>
+</html>
